@@ -1,6 +1,8 @@
 #include <stdio.h>
-#include "to_h264.h"
+#include "h264_encoder.h"
 #include <x264.h>
+#include <malloc.h>
+#include <memory.h>
 #include "common.h"
 
 #define FAIL_IF_ERROR(cond, ...)          \
@@ -23,7 +25,7 @@ static int i_nal;
 static x264_picture_t pic_out;
 
 
-int setup_h264() {
+int x264_setup() {
     x264_param_t param;
 
     /* Get default params for preset/tuning */
@@ -64,7 +66,32 @@ int setup_h264() {
     return 0;
 }
 
-int to_h264(const void *bytes, uint8_t **payload, int *p_frame_size) {
+
+/**
+ * 这里假定嵌入式设备上采集的帧是yu12格式，pc上采集的是yuyv的格式
+ * @param yuvBuffer
+ * @param nalu
+ * @param nalu_size
+ */
+void yuv_to_nalu(const void *yuvBuffer, uint8_t **nalu, int *nalu_size) {
+    uint8_t *payload = 0;
+    int frame_size = 0;
+
+#ifndef __x86_64__
+    yu12_to_nalu(yuvBuffer, &payload, &frame_size);
+#else
+    int size = (int) (VIDEO_WIDTH * VIDEO_HEIGHT * 1.5f);
+    uint8_t *yu12 = malloc(sizeof(uint8_t) * size);
+    memset(yu12, '\0', sizeof(uint8_t) * size);
+    yuyv_to_yu12(yuvBuffer, yu12, VIDEO_WIDTH, VIDEO_HEIGHT);
+    yu12_to_nalu(yu12, &payload, &frame_size);
+    free(yu12);
+#endif
+    *nalu = payload;
+    *nalu_size = frame_size;
+}
+
+int yu12_to_nalu(const void *bytes, uint8_t **payload, int *p_frame_size) {
     int i_frame_size;
 
     pic.img.plane[0] = bytes;
@@ -88,7 +115,7 @@ int to_h264(const void *bytes, uint8_t **payload, int *p_frame_size) {
     }
 }
 
-int finish_h264(int (*callback)(uint8_t *payload, int i_frame_size)) {
+int x264_flush_dispose(int (*callback)(uint8_t *payload, int i_frame_size)) {
     /* Flush delayed frames */
     while (x264_encoder_delayed_frames(h)) {
         int i_frame_size = x264_encoder_encode(h, &nal, &i_nal, NULL, &pic_out);
@@ -102,4 +129,36 @@ int finish_h264(int (*callback)(uint8_t *payload, int i_frame_size)) {
     x264_encoder_close(h);
 //    x264_picture_clean(&pic);
     return 0;
+}
+
+
+int yuyv_to_yu12(uint8_t *yuv422, uint8_t *yuv420, int width, int height) {
+    int ynum = width * height;
+    int i, j, k = 0;
+    //得到Y分量
+    for (i = 0; i < ynum; i++) {
+        yuv420[i] = yuv422[i * 2];
+    }
+    //得到U分量
+    for (i = 0; i < height; i++) {
+        if ((i % 2) != 0)continue;
+        for (j = 0; j < (width / 2); j++) {
+            if ((4 * j + 1) > (2 * width))break;
+            yuv420[ynum + k * 2 * width / 4 + j] = yuv422[i * 2 * width + 4 * j + 1];
+        }
+        k++;
+    }
+    k = 0;
+    //得到V分量
+    for (i = 0; i < height; i++) {
+        if ((i % 2) == 0)continue;
+        for (j = 0; j < (width / 2); j++) {
+            if ((4 * j + 3) > (2 * width))break;
+            yuv420[ynum + ynum / 4 + k * 2 * width / 4 + j] = yuv422[i * 2 * width + 4 * j + 3];
+
+        }
+        k++;
+    }
+
+    return 1;
 }

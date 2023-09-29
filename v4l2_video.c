@@ -9,7 +9,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include "common.h"
-#include "capture.h"
+#include "v4l2_video.h"
 
 static const char DEVICE[] = "/dev/video0";
 
@@ -155,14 +155,14 @@ static void stop_capturing(void) {
 /**
  * Readout a frame from the buffers.
  */
-static int read_frame(void) {
-    struct v4l2_buffer buffer;
-    memset(&buffer, 0, sizeof(buffer));
-    buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buffer.memory = V4L2_MEMORY_MMAP;
+static struct v4l2_buffer *read_frame(void) {
+    struct v4l2_buffer *pBuffer = malloc(sizeof(struct v4l2_buffer));
+    memset(pBuffer, 0, sizeof(*pBuffer));
+    pBuffer->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    pBuffer->memory = V4L2_MEMORY_MMAP;
 
     // Dequeue a buffer
-    if (-1 == xioctl(fd, VIDIOC_DQBUF, &buffer)) {
+    if (-1 == xioctl(fd, VIDIOC_DQBUF, pBuffer)) {
         switch (errno) {
             case EAGAIN:
                 // No buffer in the outgoing queue
@@ -175,17 +175,25 @@ static int read_frame(void) {
         }
     }
 
-    assert(buffer.index < num_buffers);
+    assert(pBuffer->index < num_buffers);
 
-    process_image(buffers[buffer.index].start, buffers[buffer.index].length);
+    return pBuffer;
+}
 
+void v4l2_get_data_address(struct v4l2_buffer *pBuffer, void **start, int *len) {
+    *start = buffers[pBuffer->index].start;
+    *len = buffers[pBuffer->index].length;
+}
+
+void v4l2_enqueue_buffer(struct v4l2_buffer *pBuffer) {
     // Enqueue the buffer again
-    if (-1 == xioctl(fd, VIDIOC_QBUF, &buffer)) {
+    if (-1 == xioctl(fd, VIDIOC_QBUF, pBuffer)) {
+        free(pBuffer);
         perror("VIDIOC_QBUF");
         exit(errno);
     }
 
-    return 1;
+    free(pBuffer);
 }
 
 /**
@@ -193,58 +201,53 @@ static int read_frame(void) {
  *
  * See https://www.gnu.org/software/libc/manual/html_node/Waiting-for-I_002fO.html
  */
-static void main_loop(void) {
-    unsigned int count = 900; // Record 100 frames
-    while (count-- > 0) {
+struct v4l2_buffer *v4l2_dequeue_buffer(void) {
+    fd_set fds;
+    struct timeval tv;
+    int r;
+    for (;;) {
+        // Clear the set of file descriptors to monitor, then add the fd for our device
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
 
-        fd_set fds;
-        struct timeval tv;
-        int r;
-        for (;;) {
-            usleep(66 * 1000);
+        // Set the timeout
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
 
-            // Clear the set of file descriptors to monitor, then add the fd for our device
-            FD_ZERO(&fds);
-            FD_SET(fd, &fds);
+        /**
+         * Arguments are
+         * - number of file descriptors
+         * - set of read fds
+         * - set of write fds
+         * - set of except fds
+         * - timeval struct
+         *
+         * According to the man page for select, "nfds should be set to the highest-numbered file
+         * descriptor in any of the three sets, plus 1."
+         */
+        r = select(fd + 1, &fds, NULL, NULL, &tv);
 
-            // Set the timeout
-            tv.tv_sec = 2;
-            tv.tv_usec = 0;
+        if (-1 == r) {
+            if (EINTR == errno)
+                continue;
 
-            /**
-             * Arguments are
-             * - number of file descriptors
-             * - set of read fds
-             * - set of write fds
-             * - set of except fds
-             * - timeval struct
-             *
-             * According to the man page for select, "nfds should be set to the highest-numbered file
-             * descriptor in any of the three sets, plus 1."
-             */
-            r = select(fd + 1, &fds, NULL, NULL, &tv);
+            perror("select");
+            exit(errno);
+        }
 
-            if (-1 == r) {
-                if (EINTR == errno)
-                    continue;
-
-                perror("select");
-                exit(errno);
-            }
-
-            if (0 == r) {
-                fprintf(stderr, "select timeout\n");
-                exit(EXIT_FAILURE);
-            }
-
-            if (read_frame())
-                // Go to next iterartion of fhe while loop; 0 means no frame is ready in the outgoing queue.
-                break;
+        if (0 == r) {
+            fprintf(stderr, "select timeout\n");
+            exit(EXIT_FAILURE);
+        }
+        struct v4l2_buffer *pBuffer;
+        if (pBuffer = read_frame()) {
+            // Go to next iterartion of fhe while loop; 0 means no frame is ready in the outgoing queue.
+            return pBuffer;
         }
     }
 }
 
-int do_capture_work() {
+int v4l2_setup() {
     // Open the device file
     fd = open(DEVICE, O_RDWR);
     if (fd < 0) {
@@ -255,9 +258,9 @@ int do_capture_work() {
     init_device();
 
     start_capturing();
+}
 
-    main_loop();
-
+int v4l2_dispose() {
     stop_capturing();
 
     // Cleanup
@@ -266,6 +269,5 @@ int do_capture_work() {
     free(buffers);
     close(fd);
 
-    printf("\n\nDone.\n");
     return 0;
 }

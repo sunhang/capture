@@ -20,12 +20,12 @@
 #endif
 #define I_CSP X264_CSP_I420
 #define FPS  15
+#define VIDEO_CAPTURE_LOOP 2048
 
 /**
  * Wrapper around ioctl calls.
  */
 int xioctl(int fd, int request, void *arg);
-int yuv422_to_420(uint8_t *yuv422, uint8_t *yuv420, int width, int height);
 void begin_mark_timestemp(const char* tag);
 void end_mark_timestamp();
 
